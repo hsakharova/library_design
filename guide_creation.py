@@ -25,7 +25,7 @@ Inputs:
 - w: size of windows (in bp). If deletion is False, must be a multiple of 3 (to target codons)
 - do_not_filter: boolean. Whether or not to filter the generated guides. The filtering steps (by default) are to remove all 
     guides with off-target matches elsewhere in the yeast genome (guides that have an off-target match with less than 3 mismatches).
-    Off-target matches are found using bowtie2 (installation of bowtie2 is required). Donor-guide inserts are then selected to 
+    Off-target matches are found using bowtie (installation of bowtie is required). Donor-guide inserts are then selected to 
     not have long repeats and to have an edited nucleotide within the seed region of the guide. 
 
 Outputs:
@@ -70,11 +70,18 @@ def make_library(genes, positions, original_windows, deletion=True, w=3, do_not_
     print("")
     print("After filtering for off-target matches:", len(inserts_db), 
           "guides for", len(set(list(inserts_db.target))), "targets")
-    add_edits_info(inserts_db)
-    inserts_db = count_replicates(inserts_db)
-    select_guides(inserts_db)
-    #TODO: do I want to ensure that guides are unique? nah
-    inserts_db = inserts_db[inserts_db.selected]
+    if deletion:
+        #make sure deletion in good range -->
+        #make sure no long repeats
+        inserts_db["repeat_length"] = [longest_run(inserts_db.donor[i]) for i in inserts_db.index]
+        inserts_db["edit_pos"] = [del_edit_pos(inserts_db.loc[i]) for i in inserts_db.index]
+        inserts_db = inserts_db[(inserts_db.edit_pos >= -7) & (inserts_db.repeat_length < 10)]
+    else:
+        add_edits_info(inserts_db)
+        inserts_db = count_replicates(inserts_db)
+        select_guides(inserts_db)
+        #TODO: do I want to ensure that guides are unique? nah
+        inserts_db = inserts_db[inserts_db.selected]
     print("")
     print("After selecting for repeats/edits in guide:", len(inserts_db), 
           "guides for", len(set(list(inserts_db.target))), "targets")
@@ -194,7 +201,7 @@ def get_all_guides(chrom,start,w=3,max_dist=30):
     return fw_guides + rev_guides
 
 "Function to check that database of inserts (idb) was constructred correctly"
-def sanity_checks(idb, additional_checks=False, deletion=False): #assumes 50 bp arms, cut pos in middle
+def sanity_checks(idb, additional_checks=True, deletion=False): #assumes 50 bp arms, cut pos in middle
     for i in idb.index:
         w = idb.w_size[i] #IN BP
         assert(len(idb.donor[i])==100)
@@ -208,10 +215,10 @@ def sanity_checks(idb, additional_checks=False, deletion=False): #assumes 50 bp 
             del_size = w
             if idb.guide_strand[i]=="-":
                 shift = del_size-shift #I think?
-        assert(len(idb.wt_seq[i])+del_size==100)
+        assert(len(idb.wt_seq[i])-del_size==100)
         assert(idb.wt_seq[i][33+shift:53+shift] == idb.guide_seq[i]), str(idb.gene[i]) + "_" + str(idb.w_codon_num[i])
         assert(idb.wt_seq[i][54+shift:56+shift]=="GG") #PAM assertion 
-        assert(idb.original_window[i]==idb.old_window[i]), i
+        assert(idb.target_window[i]==idb.old_window[i]), i
         assert(len(idb.insert_seq[i])==194)
         if not deletion:
             w_on_strand = idb.new_window[i]
@@ -226,7 +233,7 @@ def sanity_checks(idb, additional_checks=False, deletion=False): #assumes 50 bp 
             #assert(donor_on_strand.index(w_on_strand) == 50 + idb.w_chrom_pos[i] - idb.cut_pos[i]) #this doesn't work if multiple same windows, eg w=1
             assert(donor_on_strand[50+idb.w_chrom_pos[i]-idb.cut_pos[i]:50+idb.w_chrom_pos[i]-idb.cut_pos[i]+w*3]==w_on_strand)
             nm_window = num_mismatch(idb.old_window[i], idb.new_window[i])
-            nm_donor = num_mismatch(idb.original_window[i], idb.donor[i])  
+            nm_donor = num_mismatch(idb.target_window[i], idb.donor[i])  
             assert(nm_window==nm_donor)
             assert(len(idb.new_window[i])==w)
         else:
@@ -247,11 +254,11 @@ def sanity_checks(idb, additional_checks=False, deletion=False): #assumes 50 bp 
             #check that window does not cross introns/ends
             assert(not intersecting_intron(idb.gene[i], idb.w_chrom_pos[i], idb.w_chrom_pos[i]+w)), msg
             #check that slow is indeed correct
-            assert(get_seq_in_gene(idb.gene[i], idb.w_gene_pos[i], idb.w_gene_pos[i]+w) == idb.original_window[i])
+            assert(get_seq_in_gene(idb.gene[i], idb.w_gene_pos[i], idb.w_gene_pos[i]+w) == idb.target_window[i])
             if idb.gene_strand[i] == '-':
-                assert(rev_complement(get_seq(idb.chrom[i], idb.w_chrom_pos[i], idb.w_chrom_pos[i]+w)) == idb.original_window[i])
+                assert(rev_complement(get_seq(idb.chrom[i], idb.w_chrom_pos[i], idb.w_chrom_pos[i]+w)) == idb.target_window[i])
             else:
-                assert(get_seq(idb.chrom[i], idb.w_chrom_pos[i], idb.w_chrom_pos[i]+w) == idb.original_window[i])  
+                assert(get_seq(idb.chrom[i], idb.w_chrom_pos[i], idb.w_chrom_pos[i]+w) == idb.target_window[i])  
             #a change was made!
             assert(idb.old_window[i] != idb.new_window[i])
             assert(idb.wt_seq[i] != idb.donor[i])
@@ -604,4 +611,17 @@ def slow_to_fast(seq):
     fast_list = [codon_info[codon_info.AA==aa].er.idxmax() 
                  for aa in aa_list]
     return "".join(fast_list)
+
+
+def del_edit_pos(insert_row):
+    guide_strand = 1
+    if insert_row.guide_strand=='-':
+        guide_strand = -1
+    guide_end = insert_row.cut_pos + guide_strand*3 #where the 0 pos of guide is
+    dist1 = (insert_row.w_chrom_pos - guide_end)*guide_strand
+    dist2 = dist1 + insert_row.w_size*guide_strand
+    edits_in_guide = [x for x in range(min(dist1,dist2), max(dist1,dist2)) if x >= -20 and x <= 2 and x!=0]
+    if len(edits_in_guide)==0:
+        return None
+    return max(edits_in_guide)
 
