@@ -408,12 +408,16 @@ def guide_list_to_dict(gl):
     return {str(x[1])+"_"+str(x[2])+x[3]:x[0] for x in gl}
 
 #guides_dict is guide_name : guide_seq
-def make_fastq_file(fname, guides_dict):
+def make_fastq_file(fname, guides_dict, add_pam=False, ignore_bases = 0):
+    #if add_pam, we want to add "NGG" for the guide
     #print(guides_dict)
+    pam = ""
+    if add_pam:
+        pam ="NGG" #question --> note that this 'N' counts as an extra mismatch
     with open(fname, 'w') as f:
         for key in guides_dict:
             f.write(">"+key+"\n")
-            f.write(guides_dict[key]+"\n")
+            f.write(guides_dict[key][ignore_bases:]+pam+"\n")
     return
 
 #position in gene to position in chromosome
@@ -564,14 +568,43 @@ def filter_guides(inserts_db, guide_col="guide_seq"):
     #add 'n_off_targets' to 'filter_guides'
     save_f = "tmp/inserts.fa"
     #TODO
-    make_fastq_file(save_f, {str(i):inserts_db[guide_col][i] for i in inserts_db.index})
+    #seed here will be considered the 10 nt upstream of the guide
+    make_fastq_file(save_f, {str(i):inserts_db[guide_col][i] for i in inserts_db.index}, add_pam=False, ignore_bases=0)
     #%cd /mnt/lareaulab/shelen/slow_codons_2021/data/
-    os.system(f"bowtie -f -v 3 -a {index_file} tmp/inserts.fa > tmp/bowtie_out.csv")
+    #os.system(f"bowtie -f -v 3 -a {index_file} tmp/inserts.fa > tmp/bowtie_out.csv")
+    os.system(f"bowtie -f -v 3 -a {index_file} tmp/inserts.fa > tmp/bowtie_out.csv") 
+    #wanted to change to -v 4 because 'N' in PAM is always a mismatch
+    #unfortunate. Turns out you can't have mismatch-4, only up to 3
+    #I coulddd align with PAM, 3 (actually 2) mismatches, drop all where there is no mismatch in seed or PAM?
+    #this would still "allow" any with 3 mismatches in not-seed-or-pam 
+    #should I allow this...?
+    #I could be harsher, and just align the seed and PAM, with v-2 .... this will remove guides with tons of mismatches outside the seed
+    #but allow them as long as there is at least 1 difference in seed or PAM
+    #The only other solution I can think of is somehow combining info from several bowtie runs?
+    #Ok FOR NOW we will allow guides that have .... any mismatches in the seed region or PAM? so v-1
+    #to be slightly stricter we can allow any mismatches in PAM, or 2 mismatches in seed (10)
+    #could try any mismatches in PAM, or 1 mismatch in seed (7? 8?)
     #%cd /mnt/lareaulab/shelen/slow_codons_2021/code/
+    #naahhhh these are too short. 
+    #I think you can first do no-PAM, up to 3 mismatches
+    #... and then check all the 3-mismatches for if they have a PAM sequence after them...?
+    #... or do 
     load_f = "tmp/bowtie_out.csv"
     bowtie_info = pd.read_csv(load_f, sep="\t", header=None, names=["guide_id","strand","chr","chr_pos","seq","aln","?","mismatch"])
+    #TODO - allow mismatches if the mismatch is in the PAM region? [21,22]
+    #bowtie_info = bowtie_info[~(bowtie_info.mismatch.str.contains('21') | bowtie_info.mismatch.str.contains('22'))]
+    #TODO - allow mismatches if there are off-targets in the seed region?
+    #TODO - check if there is a PAM after the sequence?
+    print('Checking for PAMs')
+    #need to account for strand       
+    bowtie_info["PAM"] = [((bowtie_info.strand[i]=='+') and (get_seq(bowtie_info.chr[i], bowtie_info.chr_pos[i]+21, bowtie_info.chr_pos[i]+23) == 'GG')) or
+                          ((bowtie_info.strand[i]=='-') and (get_seq(bowtie_info.chr[i], bowtie_info.chr_pos[i]-3, bowtie_info.chr_pos[i]-1) == 'CC')) 
+                           for i in bowtie_info.index]
+    bowtie_info = bowtie_info[bowtie_info.PAM] #only those that have a PAM are valid alignments 
     #maybe there's a lot of guides that only align to one spot, but have multiple targets
+    #TODO: this works now, clean it up
     inserts_db["n_off_targets"] = [sum(bowtie_info.guide_id == i)-1 for i in inserts_db.index]
+    assert(np.all(inserts_db.n_off_targets >= 0)), "some guides not aligned by bowtie at all??"
     return inserts_db
     #guides_to_use = [seq for seq in inserts_db[guide_col] if sum(bowtie_info.seq==seq) == 1]
     #return guides_to_use #sequences of guides
