@@ -1,5 +1,7 @@
 from guide_creation import *
 
+
+
 #THIS USES sk1_truncations.
 
 
@@ -17,6 +19,7 @@ sorfs.end = sorfs.end.astype(int)
 #print(sorfs)
 #assert(np.all(sorfs.sizes == sorfs.end-sorfs.start))
 #assert(np.all(sorfs.exons == 1))
+
 
 sorfs['seq'] = [get_seq(sorfs.chr[i], sorfs.start[i], sorfs.end[i]) if sorfs.strand[i]=='+'
                 else rev_complement(get_seq(sorfs.chr[i], sorfs.start[i], sorfs.end[i]))
@@ -86,7 +89,12 @@ for i in range(11): #change to 10 ---> this is all starts *except* there was one
 
 #old_windows = ['TG']*len(positions) #for deletion
 old_windows = ['ATG']*len(positions)
-new_windows = ['TAA']*len(positions) #more disruptions this way?
+new_windows = ['ATT']*len(positions) #changing to an optimal ILE codon
+#we also want to change to a sub
+#or should I use optimal leucine 'TTG'?
+#ALA - use GCT (most common, highest tai, high er)
+#new_windows = ['GCT']*len(positions) 
+
 
 assert(len(positions)==len(sorf_names))
 
@@ -99,7 +107,7 @@ set_db_genes(db_sorfs)
 #only the ... first 3? 
 #variant_inserts = make_library(sorf_names, positions, old_windows, deletion=True, w=2)
 
-variant_inserts = make_library(sorf_names, positions, old_windows, new_windows, deletion=False, w=3)
+variant_inserts = make_library(sorf_names, positions, old_windows, new_windows, w=3, seed_size=17, lenient=True) #17 for any_edit
 
 print('Length variants:', len(variant_inserts))
 print('Variants targeting 1st position:', np.sum(variant_inserts.w_gene_pos == 0))
@@ -108,14 +116,16 @@ print('Unique genes targeted:', len(set(variant_inserts.gene)))
 
 variant_inserts['gene_length'] = [db_sorfs.cdsEnd[i] - db_sorfs.cdsStart[i] for i in variant_inserts.gene]
 print('Start position more than halfway down gene', np.sum((variant_inserts.w_gene_pos / variant_inserts.gene_length) >= 0.5))
-
-x = len(set(variant_inserts[((variant_inserts.w_gene_pos / variant_inserts.gene_length) <= 0.2)].gene))
-print('Genes with at least an alt start codon less than 20 percent down the gene', x)
+x = len(set(variant_inserts[((variant_inserts.w_gene_pos / variant_inserts.gene_length) <= 0.5)].gene))
+print('Genes with at least an alt start codon less than 50 percent down the gene', x)
+x = len(set(variant_inserts[((variant_inserts.w_gene_pos / variant_inserts.gene_length) <= 0.25)].gene))
+print('Genes with at least an alt start codon less than 25 percent down the gene', x)
 x = len(set(variant_inserts[(variant_inserts.w_gene_pos == 0)].gene))
 print('Genes with the first start codon targeted', x)
 
-
-variant_inserts.to_csv('brar_data/sorfs_trunc_inserts.csv')
+variant_inserts['percent_loc'] = [percent_loc(variant_inserts.gene[i], variant_inserts.w_codon_num[i]) for i in variant_inserts.index]
+variant_inserts['downstream_starts'] = [downstream_starts(variant_inserts.gene[i], variant_inserts.w_codon_num[i]) for i in variant_inserts.index]
+variant_inserts.to_csv('brar_data/sorfs_trunc_lenient.csv')
 
 #what db_genes is queried for?
 #chrom strand exonCount exonStarts exonEnds cdsEnd
