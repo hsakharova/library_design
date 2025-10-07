@@ -4,6 +4,7 @@ import re
 from ast import literal_eval
 import collections
 import os
+print('restarted')
 
 #load_files
 db_genes = pd.read_csv("data/db_genes.csv", sep=",", index_col=0, header=0)
@@ -12,7 +13,7 @@ db_genes = db_genes.where(pd.notnull(db_genes), None)
 db_genes.exonStarts = [literal_eval(x) for x in db_genes.exonStarts]
 db_genes.exonEnds = [literal_eval(x) for x in db_genes.exonEnds]
 codon_info = pd.read_pickle("data/codon_info.pkl")
-index_file = 'placeholder' #yeast_genes/sacCer_index'
+index_file = 'yeast_genes/sacCer_index'
 
 
 #TODO even more hacky
@@ -61,6 +62,11 @@ def set_chrom_dict(new_chrom_dict):
     global reference_sacCer3
     reference_sacCer3 = False
 
+def obtain_chrom_dict():
+    print('reference is', reference_sacCer3)
+    if not reference_sacCer3:
+        return chrom_dict
+
 def get_seq(chrom, start, end, original=True):
     if not reference_sacCer3:
         return chrom_dict[chrom][start:end]
@@ -94,8 +100,12 @@ Inputs:
 Outputs:
 - inserts_db: Pandas dataframe containing the donor-guide CRISPEY insert sequences along with relevant information 
 '''
-def make_library(genes, positions, original_windows, new_windows=None, w=3, do_not_filter=False, seed_size=7, lenient=False):
+def make_library(genes, positions, original_windows, new_windows=None, w=3, do_not_filter=False, seed_size=7, lenient=False, prefix='v_'):
     assert(len(genes)==len(positions))
+    if new_windows is not None:
+        assert(len(set(zip(genes, positions, new_windows))) == len(positions)), 'targets should be unique' #
+    else:
+        assert(len(set(zip(genes, positions))) == len(positions)), 'targets should be unique'
     print("Number of targets:", len(genes))
     idb_list = []
     for i in range(len(genes)):
@@ -121,10 +131,11 @@ def make_library(genes, positions, original_windows, new_windows=None, w=3, do_n
     inserts_db = pd.concat(idb_list)
     inserts_db = inserts_db.reset_index()
     inserts_db = inserts_db.drop("index", axis=1) 
-    inserts_db["target"] = [inserts_db.gene[i]+"_"+str(inserts_db.w_gene_pos[i])
+    #CHANGED: add new_window to target
+    inserts_db["target"] = [inserts_db.gene[i]+"_"+str(inserts_db.w_gene_pos[i]) + '_' + inserts_db.new_window[i] 
                           for i in inserts_db.index]
-    prefix = 'variant_'
-    inserts_db["name"] = [prefix+inserts_db.gene[i]+"_"+str(inserts_db.w_gene_pos[i])+'_guide_'+
+    #CHANEGD: add new_window to name
+    inserts_db["name"] = [prefix+inserts_db.gene[i]+"_"+str(inserts_db.w_gene_pos[i]) + '_' + inserts_db.new_window[i] +'_guide_'+
                           inserts_db.chrom[i]+'_'+inserts_db.guide_strand[i]+'_'+str(inserts_db.cut_pos[i])
                           for i in inserts_db.index]
     inserts_db = inserts_db.set_index('name')
@@ -135,7 +146,15 @@ def make_library(genes, positions, original_windows, new_windows=None, w=3, do_n
     if do_not_filter:
         print("DID NOT FILTER")
         return inserts_db
+    #Ensure no 'N' in insert seq
+    inserts_db = inserts_db[[True if 'N' not in x else False for x in inserts_db.insert_seq]]
+    print(f"After removing any guide-donors with 'N': {len(inserts_db)} guides \
+          for {len(set(list(inserts_db.target)))} targets") 
     #instead of dropping mismatches/etc., lets keep them?
+    #filter for change
+    inserts_db = filter_for_change(inserts_db)
+    print(f"After removing any guide-donors that would target themselves: {len(inserts_db)} guides \
+          for {len(set(list(inserts_db.target)))} targets") 
     print("")
     print("Before filtering for off-target matches:", len(inserts_db), 
           "guides for", len(set(list(inserts_db.target))), "targets in",
@@ -161,10 +180,6 @@ def make_library(genes, positions, original_windows, new_windows=None, w=3, do_n
     print("After selecting for repeats/edits in guide:", len(inserts_db), 
           "guides for", len(set(list(inserts_db.target))), "targets in",
           len(set(inserts_db.gene)),"genes")
-    #Ensure no 'N' in guide
-    inserts_db = inserts_db[[True if 'N' not in x else False for x in inserts_db.insert_seq]]
-    print(f"After removing any guides with 'N': {len(inserts_db)} guides \
-          for {len(set(list(inserts_db.target)))} targets")
     inserts_db = count_replicates(inserts_db)
     inserts_db = inserts_db.reset_index()
     return inserts_db #filtered for selected 
@@ -386,6 +401,9 @@ def sanity_checks(idb, additional_checks=False, synonymous=False): #assumes 50 b
             #a change was made!
             assert(idb.old_window[i] != idb.new_window[i])
             assert(idb.wt_seq[i] != idb.donor[i])
+            #TODO - check guide seq + NGG not in donor --
+            assert(not re.search(idb.guide_seq[i] + '.GG', idb.donor[i]))
+
             #check that amino acid sequence slow, fast is the same
             #if not deletion:
             if synonymous:
@@ -597,8 +615,14 @@ def intersecting_intron(gene, start, end, verbose=False):
             print(start, end, exon_starts, exon_ends)
         return True
 
+def filter_for_change(inserts_db):
+    #this HAS to be used if mutations are just deletions without accounting for context
+    #checks that the guide_seq + NGG has NO match in the donor
+    changed = np.array([not bool(re.search(inserts_db.guide_seq[i] + '.GG', inserts_db.donor[i])) for i in inserts_db.index]).astype(bool)
+    return inserts_db[changed]
+
 #lenient allows for any mismatch in seed
-def filter_guides(inserts_db, guide_col="guide_seq", lenient=False):
+def filter_guides(inserts_db, guide_col="guide_seq", lenient=False, random_guides=False):
     #filter guides for those that have no off-targets (<= 3 mismatches) 
     #add 'n_off_targets' to 'filter_guides'
     save_f = "tmp/inserts.fa"
@@ -643,11 +667,15 @@ def filter_guides(inserts_db, guide_col="guide_seq", lenient=False):
     bowtie_info["PAM"] = [((bowtie_info.strand[i]=='+') and (get_seq(bowtie_info.chr[i], bowtie_info.chr_pos[i]+21, bowtie_info.chr_pos[i]+23) == 'GG')) or
                           ((bowtie_info.strand[i]=='-') and (get_seq(bowtie_info.chr[i], bowtie_info.chr_pos[i]-3, bowtie_info.chr_pos[i]-1) == 'CC')) 
                            for i in bowtie_info.index]
-    bowtie_info = bowtie_info[bowtie_info.PAM] #only those that have a PAM are valid alignments 
+    if not random_guides:
+        bowtie_info = bowtie_info[bowtie_info.PAM] #only those that have a PAM are valid alignments 
+        #for random guides, let's get guides that align nowhere at all ... ?
     #maybe there's a lot of guides that only align to one spot, but have multiple targets
     #TODO: this works now, clean it up
     inserts_db["n_off_targets"] = [sum(bowtie_info.guide_id == i)-1 for i in inserts_db.index]
-    assert(np.all(inserts_db.n_off_targets >= 0)), "some guides not aligned by bowtie at all??"
+    if not random_guides:
+        print(inserts_db[inserts_db.n_off_targets < 0])
+        assert(np.all(inserts_db.n_off_targets >= 0)), "some guides not aligned by bowtie at all??"
     return inserts_db
     #guides_to_use = [seq for seq in inserts_db[guide_col] if sum(bowtie_info.seq==seq) == 1]
     #return guides_to_use #sequences of guides
@@ -724,11 +752,14 @@ def longest_run(seq):
             c = 1
     return max_c
 
+#CHANGE definition of 'target' to include new window.
 def count_replicates(inserts_db, modify=True):
     #how many guides each target has
     replicates = []
     for i in inserts_db.index:
-        replicates.append(np.sum((inserts_db.gene == inserts_db.gene[i])&(inserts_db.w_gene_pos == inserts_db.w_gene_pos[i]))) 
+        replicates.append(np.sum((inserts_db.gene == inserts_db.gene[i])
+                                &(inserts_db.new_window == inserts_db.new_window[i])
+                                &(inserts_db.w_gene_pos == inserts_db.w_gene_pos[i]))) 
     counter = collections.Counter(replicates)
     print("Counts:",{i:counter[i] for i in range(1, max(counter)+1)})
     print("Targets 2+ replicates:", 
