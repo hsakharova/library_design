@@ -7,103 +7,41 @@ import os
 print('restarted')
 
 #load_files
-db_genes = pd.read_csv("data/db_genes.csv", sep=",", index_col=0, header=0)
+db_genes = pd.read_csv("data/db_genes.csv", sep=",", index_col=0, header=0) #default db_genes
+#contains columns for id,protein_id,chrom,strand,exonStarts,exonEnds,txStart,txEnd,cdsStart,cdsEnd,exonCount,sacCer3 (the DNA sequence)
 db_genes = db_genes.where(pd.notnull(db_genes), None) 
-#print(db_genes.exonStarts.dtype, type(db_genes.exonStarts[0]), db_genes.exonStarts[0])
 db_genes.exonStarts = [literal_eval(x) for x in db_genes.exonStarts]
 db_genes.exonEnds = [literal_eval(x) for x in db_genes.exonEnds]
 codon_info = pd.read_pickle("data/codon_info.pkl")
 index_file = 'yeast_genes/sacCer_index'
 
-
-#TODO even more hacky
-reference_sacCer3 = True
-
-#TODO hacky
-def set_db_genes(db):
-    global db_genes 
-    db_genes = db
-    print(f'Set db_genes of {len(db_genes)} genes, first gene is {db_genes.index[0]}')
-
-def get_db_genes():
-    return db_genes
-
-def set_index_file(fname):
-    global index_file
-    index_file = fname
-    print(f'Set index as {fname}')
-
-
-#TODO: unhack this
-def get_chrom_dict(fname='brar_data/sk1_original.fasta'):
-    chrom_dict  = {}
-    with open(fname, 'r') as f:
-        lines = f.readlines()
-        chrom = "no_chrom"
-        for i, line in enumerate(lines):
-            line =line.strip()
-            #if i <= 10:
-                #print(line)
-            if line[0] == '>':
-                chrom = line[1:]
-                assert(not chrom in chrom_dict)
-                chrom_dict[chrom] = ""
-            else:
-                chrom_dict[chrom] += line
-        print(f'Using {fname} as genome. Chromosome lengths:')
-        print([(k, len(chrom_dict[k])) for k in chrom_dict])
-    return chrom_dict
-
-#chrom_dict = get_chrom_dict()
-
-def set_chrom_dict(new_chrom_dict):
-    global chrom_dict
-    chrom_dict = new_chrom_dict
-    global reference_sacCer3
-    reference_sacCer3 = False
-
-def obtain_chrom_dict():
-    print('reference is', reference_sacCer3)
-    if not reference_sacCer3:
-        return chrom_dict
-
-def get_seq(chrom, start, end, original=True):
-    if not reference_sacCer3:
-        return chrom_dict[chrom][start:end]
-    else:
-        with open("yeast_genes/" + chrom + ".fa", "r") as f:
-            lines = f.readlines()
-            seq = "".join(lines[1:])
-            seq = "".join(seq.split("\n"))
-        return seq[start:end]
-
-
-
-'''
-User-facing function. Generates a CRISPEY library of donor-guide inserts targeting specified windows in the given genes.
-If deletion is True, donor-guide inserts will delete specified windows. Otherwise, specified windows will be converted into
-synonymous sequences using the fastest-possible codons.
-
-Inputs:
-- genes: a list of strings, the yeast ORF names of the genes being targeted
-- positions: a list of integers, the positions (in base pairs) of the targeted windows inside each gene (0-indexed)
-- original_windows: a list of strings, the original DNA nucleotide sequence of the windows being targeted. 
-    (Note that genes, positions, and original_windows should be the same length)
-- deletion: boolean. Whether or not the generated CRISPEY guide-donor inserts should delete the target windows (True)
-    or replace the target windows with synonymous sequences of the fastest-possible synonymous codons. (False)
-- w: size of windows (in bp). If deletion is False, must be a multiple of 3 (to target codons)
-- do_not_filter: boolean. Whether or not to filter the generated guides. The filtering steps (by default) are to remove all 
-    guides with off-target matches elsewhere in the yeast genome (guides that have an off-target match with less than 3 mismatches).
-    Off-target matches are found using bowtie2 (installation of bowtie2 is required). Donor-guide inserts are then selected to 
-    not have long repeats and to have an edited nucleotide within the seed region of the guide. 
- TODO added new_windows
-Outputs:
-- inserts_db: Pandas dataframe containing the donor-guide CRISPEY insert sequences along with relevant information 
-'''
 def make_library(genes, positions, original_windows, new_windows=None, w=3, do_not_filter=False, seed_size=7, lenient=False, prefix='v_'):
+    '''
+    User-facing function. Generates a CRISPEY library of donor-guide inserts targeting specified windows in the given genes.
+    If new_windows is specified, original windows will be replaced by sequences in new_windows (can be empty). 
+    Otherwise, specified windows will be converted into synonymous sequences using the fastest-possible codons.
+
+    Inputs:
+    - genes: a list of strings, the yeast ORF names of the genes being targeted
+    - positions: a list of integers, the positions (in base pairs) of the targeted windows inside each gene (0-indexed)
+    - original_windows: a list of strings, the original DNA nucleotide sequence of the windows being targeted. 
+        (Note that genes, positions, and original_windows should be the same length)
+    - w: size of windows (in bp). If new_windows is None, must be a multiple of 3 (to target codons)
+    - do_not_filter: boolean. Whether or not to filter the generated guides. The filtering steps (by default) are to remove all 
+        guides with off-target matches elsewhere in the yeast genome (guides that have an off-target match with less than 3 mismatches).
+        Off-target matches are found using bowtie2 (installation of bowtie2 is required). Donor-guide inserts are then selected to 
+        not have long repeats and to have an edited nucleotide within the seed region of the guide. 
+    - seed_size: int. The number of bases that are considered to be part of the "seed region"
+    - lenient: Allow guides where there is an off-target with fewer than 3 mismatches to an off-target 
+        if the off-target has mismatches in the seed region. Default is False
+    - prefix: prefix to attach to names of oligo donor-guide inserts
+
+    Outputs:
+    - inserts_db: Pandas dataframe containing the donor-guide CRISPEY insert sequences along with relevant information 
+    '''
     assert(len(genes)==len(positions))
     if new_windows is not None:
-        assert(len(set(zip(genes, positions, new_windows))) == len(positions)), 'targets should be unique' #
+        assert(len(set(zip(genes, positions, new_windows))) == len(positions)), 'targets should be unique' 
     else:
         assert(len(set(zip(genes, positions))) == len(positions)), 'targets should be unique'
     print("Number of targets:", len(genes))
@@ -114,8 +52,6 @@ def make_library(genes, positions, original_windows, new_windows=None, w=3, do_n
             print("processing target", i, "out of", len(genes))
         gene = genes[i]
         pos = positions[i]
-        #if convert:
-        #    pos = convert_pos_to_cn(pos, gene, w=w) 
         if gene_pos_to_chrom_pos(gene,pos,w=w, throw_error=False, w_in_bp=True) is None:
             #skip if window not fully in one exon,
             #make inserts would throw error.
@@ -125,32 +61,29 @@ def make_library(genes, positions, original_windows, new_windows=None, w=3, do_n
         else:
             new_window = new_windows[i]
         idb = make_inserts(gene, pos, original_windows[i], new_window = new_window, w=w)
-        #sanity_checks(idb, w=w) for speed, will do later
-        # add stdev info, too.
         idb_list.append(idb)
     inserts_db = pd.concat(idb_list)
     inserts_db = inserts_db.reset_index()
     inserts_db = inserts_db.drop("index", axis=1) 
-    #CHANGED: add new_window to target
+    #add new_window to target
     inserts_db["target"] = [inserts_db.gene[i]+"_"+str(inserts_db.w_gene_pos[i]) + '_' + inserts_db.new_window[i] 
                           for i in inserts_db.index]
-    #CHANEGD: add new_window to name
+    #add new_window to name
     inserts_db["name"] = [prefix+inserts_db.gene[i]+"_"+str(inserts_db.w_gene_pos[i]) + '_' + inserts_db.new_window[i] +'_guide_'+
                           inserts_db.chrom[i]+'_'+inserts_db.guide_strand[i]+'_'+str(inserts_db.cut_pos[i])
                           for i in inserts_db.index]
     inserts_db = inserts_db.set_index('name')
     original_length = len(inserts_db)
-    #drop duplicates - TODO - how would duplicates happen in the first place? unsure but they did - investigate
+    #drop duplicates 
     inserts_db = inserts_db.drop_duplicates()
     print(f"Dropped {original_length - len(inserts_db)} duplicates")
-    if do_not_filter:
+    if do_not_filter: #if you want to see all possible inserts, including ones with off-targets, etc.
         print("DID NOT FILTER")
         return inserts_db
     #Ensure no 'N' in insert seq
     inserts_db = inserts_db[[True if 'N' not in x else False for x in inserts_db.insert_seq]]
     print(f"After removing any guide-donors with 'N': {len(inserts_db)} guides \
           for {len(set(list(inserts_db.target)))} targets") 
-    #instead of dropping mismatches/etc., lets keep them?
     #filter for change
     inserts_db = filter_for_change(inserts_db)
     print(f"After removing any guide-donors that would target themselves: {len(inserts_db)} guides \
@@ -174,7 +107,6 @@ def make_library(genes, positions, original_windows, new_windows=None, w=3, do_n
     add_edits_info(inserts_db)
     inserts_db = count_replicates(inserts_db)
     select_guides(inserts_db, seed_size=seed_size)
-    #TODO: do I want to ensure that guides are unique? nah
     inserts_db = inserts_db[inserts_db.selected]
     print("")
     print("After selecting for repeats/edits in guide:", len(inserts_db), 
@@ -184,24 +116,18 @@ def make_library(genes, positions, original_windows, new_windows=None, w=3, do_n
     inserts_db = inserts_db.reset_index()
     return inserts_db #filtered for selected 
 
-''' 
-Make all possible CRISPEY oligomer inserts targeting a window of length w starting 
-at a position (gene_pos) within a gene. If deletion is True, the oligomer inserts will
-create a deletion of length w at position gene_pos within the gene. Otherwise, the inserts
-will replace all slow codons within the window with the fastest possible codons. 
 
-h_arm_length sets the length of the homology arms, and original_window provides the original
-sequence of the window to be modified (primarily for downstream sanity tests)
-'''
 def make_inserts(gene, gene_pos, original_window, new_window=None, w=3, h_arm_length=50, alt_fast=True):
-    #TODO MAKING CHANGES
-        #gene_pos, w, and h_arm_length are in nucleotides
-        #if deletion is False, change a window of w/3 codons to the fastest possible codons
-        #if deletion is True, delete a window of w bp
-    #if None, replace  window of slow codons with fast codons
-    #else, replace original_window with new_window
-    #so, no deletion
-    
+    ''' 
+    Make all possible CRISPEY oligomer inserts targeting a window of length w starting 
+    at a position (gene_pos) within a gene. If deletion is True, the oligomer inserts will
+    create a deletion of length w at position gene_pos within the gene. Otherwise, the inserts
+    will replace all slow codons within the window with the fastest possible codons. 
+
+    h_arm_length sets the length of the homology arms, and original_window provides the original
+    sequence of the window to be modified (primarily for downstream sanity tests)
+    '''
+   #gene_pos, w, and h_arm_length are in nucleotides
     if new_window is None:
         if gene_pos % 3 != 0:
             raise ValueError('Gene pos is not in frame')
@@ -209,15 +135,11 @@ def make_inserts(gene, gene_pos, original_window, new_window=None, w=3, h_arm_le
             raise ValueError('Window is not mod 3 - out of frame')
     else:
         assert(len(original_window) >= len(new_window)) #NO INSERTIONS ALLOWED FOR NOW
-    #    if new_window is not None:
-    #        assert((len(new_window)==len(original_window))), 'New and old windows must be same length'
-    #else:
-    #    assert((new_window == '') or (new_window == None)), 'changing window unsupported for deletion'
     assert(len(original_window) == w) #w is the length of the original window
     constant_5ph = "GAGTTACTGTCTGTTTTCCT"
     constant_rt = "AGGAAACCCGTTTCTTCTGACGTAAGGGTGCGCA"
     constant_3ph = "GTTTCAGAGCTATGCTGGAA"
-    chrom, chrom_pos, gene_strand = gene_pos_to_chrom_pos(gene,gene_pos,w=w, w_in_bp=True) #TODO: why do you need w here?
+    chrom, chrom_pos, gene_strand = gene_pos_to_chrom_pos(gene,gene_pos,w=w, w_in_bp=True)
     guide_list = get_all_guides(chrom, chrom_pos, w=w) #w for get all guides is in bp
     inserts_db = pd.DataFrame(guide_list, 
                               columns=["guide_seq","chrom","cut_pos","guide_strand"])
@@ -227,7 +149,7 @@ def make_inserts(gene, gene_pos, original_window, new_window=None, w=3, h_arm_le
     inserts_db["w_gene_pos"] = gene_pos #base pairs into gene.
     #start of window as position in gene. does NOT include introns [cds sequence]
     inserts_db["w_chrom_pos"] = chrom_pos #position in chromosome
-    inserts_db["w_size"] = w #in bp, not codons!
+    inserts_db["w_size"] = w #in bp, not codons
     inserts_db["target_window"] = original_window
     #I would like this all to be in a pandas df 
     #with gene, gene_pos, chrom_pos, strand, 
@@ -256,26 +178,19 @@ def make_inserts(gene, gene_pos, original_window, new_window=None, w=3, h_arm_le
     insert_list = []
     change = len(original_window) - len(new_window)
     for i in inserts_db.index:
-        #donor direction --> should match guide direction ??
         cp = inserts_db.cut_pos[i]
         guide_strand = inserts_db.guide_strand[i]
         guide_seq = inserts_db.guide_seq[i]
-        #if not deletion:
-            #if no indels, just substitution
-        #    donor = get_seq(chrom, cp-h_arm_length, cp+h_arm_length)
-        #    loc_w = h_arm_length + chrom_pos - cp
-        #if deletion:
-            #depending on if chrom_pos is before/after cut_pos
         shift = max(min(cp - chrom_pos, change), 0) #so between del_size (w) and 0
         donor = get_seq(chrom, cp-h_arm_length-shift, cp+h_arm_length+change-shift) #+ strand
-        loc_w = h_arm_length + chrom_pos - cp + shift   #TODO what is loc_w?
+        loc_w = h_arm_length + chrom_pos - cp + shift 
         window_to_insert = new_window
         if gene_strand == "-":
             window_to_insert = rev_complement(window_to_insert)
         mod_donor = donor[:loc_w]+window_to_insert+donor[loc_w+w:]  #+ strand
         if guide_strand == "-":
             donor=rev_complement(donor)
-            mod_donor = rev_complement(mod_donor) #So if both are -, window will be normal again
+            mod_donor = rev_complement(mod_donor) #So if both are -, window will be + again
         wt_donor_list.append(donor)
         mod_donor_list.append(mod_donor)
         insert_list.append(constant_5ph + mod_donor + constant_rt 
@@ -283,27 +198,19 @@ def make_inserts(gene, gene_pos, original_window, new_window=None, w=3, h_arm_le
     inserts_db["wt_seq"] = wt_donor_list
     inserts_db["donor"] = mod_donor_list
     inserts_db["insert_seq"] = insert_list
-    #NOTE: SO THIS MEANS THAT DONOR IS IN THE DIRECTION OF THE GUIDE
+    #donor is in the direction of the guide,
     #NOT necessarily in the direction of the gene
     return inserts_db
 
 
-#so I guess now, if we want all [?] possible ways to knock down a gene
-#or do we want to filter some preemptiveley - e.g. early in a sequence? multiple guides targetting same site?
-#want to introduce stop+frameshift ...?
-#maybe, first, check which genes have guides that work
-
-
-
-
-'''Returns all possible guide sequences that will intersect with a given window
+def get_all_guides(chrom,start,end=None, w=3): 
+    '''Returns all possible guide sequences that will intersect with a given window
 Window can be defined by start:start+w (note that start is with respect to chromosome, not strand)
 or by start:end'''
-def get_all_guides(chrom,start,end=None, w=3): #20 is already too far away, actually - but whatever
     #w and max_dist are in bp
     if end is None:
         end = start+w
-    guide_length = 20
+    guide_length = 20 #some of these will be too far away, but this is fine
     #back_dist = max_dist-w-4 #distance to search back 
     #(4-> 'cut' 1 2 3 N | G G --> to limit where to look for GG)
     back_dist = 1 #only | G  w_0/G w_1 w_2 .... is acceptable - where to look for GG
@@ -318,19 +225,27 @@ def get_all_guides(chrom,start,end=None, w=3): #20 is already too far away, actu
                   for m in re.finditer('GG',fw_seq)]
     rev_indices = [end -m.start() + back_dist + 4 #to get location of cut
                    for m in re.finditer('GG', rev_seq)]
-    #print(rev_seq)
-    #print([m.start() for m in re.finditer('GG', rev_seq)])
     fw_guides = [(get_guide(chrom,cp,"+"),chrom,cp,"+") 
                  for cp in fw_indices]
     rev_guides = [(get_guide(chrom,cp,"-"),chrom,cp,"-")
                  for cp in rev_indices]
     return fw_guides + rev_guides
 
+def get_seq(chrom, start, end):
+    '''Return the reference sequence (positive strand) given the chromosome and start and end coordinates'''
+    if not reference_sacCer3:
+        return chrom_dict[chrom][start:end]
+    else:
+        with open("yeast_genes/" + chrom + ".fa", "r") as f:
+            lines = f.readlines()
+            seq = "".join(lines[1:])
+            seq = "".join(seq.split("\n"))
+        return seq[start:end]
 
 
 
-"Function to check that database of inserts (idb) was constructred correctly"
 def sanity_checks(idb, additional_checks=False, synonymous=False): #assumes 50 bp arms, cut pos in middle
+    "Function to check that database of inserts (idb) was constructed correctly"
     for i in idb.index:
         w = idb.w_size[i] #IN BP
         assert(len(idb.donor[i])==100)
@@ -341,45 +256,15 @@ def sanity_checks(idb, additional_checks=False, synonymous=False): #assumes 50 b
             guide_s = -1
         shift = min(max(idb.cut_pos[i]-idb.w_chrom_pos[i], 0), del_size)
         if idb.guide_strand[i]=="-":
-            shift = del_size-shift #I think?
-        #assert(len(idb.wt_seq[i])+del_size==100)
+            shift = del_size-shift
         assert(len(idb.wt_seq[i])-del_size==100)
         assert(idb.wt_seq[i][33+shift:53+shift] == idb.guide_seq[i]), str(idb.gene[i]) + "_" + str(idb.w_codon_num[i])
         assert(idb.wt_seq[i][54+shift:56+shift]=="GG") #PAM assertion 
         assert(idb.target_window[i]==idb.old_window[i]), i
         assert(len(idb.insert_seq[i])==194)
-        '''
-        if not deletion:
-            w_on_strand = idb.new_window[i]
-            donor_on_strand = idb.donor[i]
-            if idb.gene_strand[i] == "-":
-                w_on_strand = rev_complement(w_on_strand)
-            if idb.guide_strand[i] == "-":
-                donor_on_strand = rev_complement(donor_on_strand)
-            assert(idb.guide_seq[i] in idb.wt_seq[i])
-            #assert(idb.wt_seq[i].index(idb.guide_seq[i]) == 33) #this could fail if guide in sequence twice??
-            assert(w_on_strand in donor_on_strand)
-            #assert(donor_on_strand.index(w_on_strand) == 50 + idb.w_chrom_pos[i] - idb.cut_pos[i]) #this doesn't work if multiple same windows, eg w=1
-            try:
-                assert(donor_on_strand[50+idb.w_chrom_pos[i]-idb.cut_pos[i]:50+idb.w_chrom_pos[i]-idb.cut_pos[i]+w]==w_on_strand)
-            except:
-                print("Something went wrong")
-                print(idb.gene[i])
-                print(idb.gene_strand[i])
-                print(idb.w_chrom_pos[i], idb.cut_pos[i], w, idb.w_gene_pos[i])
-                print(donor_on_strand)
-                print(w_on_strand)
-                print(donor_on_strand[50+idb.w_chrom_pos[i]-idb.cut_pos[i]:50+idb.w_chrom_pos[i]-idb.cut_pos[i]+w])
-                raise ValueError()
-            nm_window = num_mismatch(idb.old_window[i], idb.new_window[i])
-            nm_donor = num_mismatch(idb.wt_seq[i], idb.donor[i])  #TODO: target window *is* old window, not 
-            assert(nm_window==nm_donor)
-            assert(len(idb.new_window[i])==w)
-        else:
-        '''
         insert_pos = 50 + (idb.w_chrom_pos[i] - idb.cut_pos[i])*guide_s + shift
         if guide_s == -1:
-            insert_pos = insert_pos - del_size - len(idb.new_window[i]) #TODO: correct?
+            insert_pos = insert_pos - del_size - len(idb.new_window[i])
         old_seq = idb.old_window[i]
         assert(len(old_seq)==del_size+len(idb.new_window[i]))
         if idb.guide_strand[i] != idb.gene_strand[i]:
@@ -405,14 +290,12 @@ def sanity_checks(idb, additional_checks=False, synonymous=False): #assumes 50 b
             assert(not re.search(idb.guide_seq[i] + '.GG', idb.donor[i]))
 
             #check that amino acid sequence slow, fast is the same
-            #if not deletion:
             if synonymous:
                 assert(amino_acid_seq(idb.old_window[i]) == amino_acid_seq(idb.new_window[i]))
-                #fast is faster than slow?  #ah but for neutral [1 codon change] it's not actually faster .... oops
+                #fast is faster than slow?  
                 if idb.w_size[i] != 3: #the following is not true for single codon changes (where I used alt_fast)
                     assert(slow_to_fast(idb.old_window[i]) == idb.new_window[i]) #
             assert(idb.w_codon_num[i] == idb.w_gene_pos[i] // 3) #I think this is correct
-            #TODO slow/fast are misnomers for neutral
             #check that constant sequences are correct, and donor/guide in correct spot
             assert(idb.insert_seq[i][:20] == "GAGTTACTGTCTGTTTTCCT")
             assert(idb.insert_seq[i][-20:] == "GTTTCAGAGCTATGCTGGAA")
@@ -423,44 +306,103 @@ def sanity_checks(idb, additional_checks=False, synonymous=False): #assumes 50 b
             chr_ps = get_chrom_pos(idb.gene[i],idb.w_gene_pos[i],idb.w_size[i])
             assert(chr_ps == idb.w_chrom_pos[i]), [chr_ps, idb.w_chrom_pos[i], idb.gene[i], 
                                                    idb.w_gene_pos[i], idb.w_size[i]]
+            
+'''
+If you wish to use a different reference or db_genes:
+'''
 
-'''Function to recover sequences from fasta files corresponding to yeast chromosomes
-- substitute if sequences must be recovered from elsewhere'''   
-'''      
-def get_seq(chrom,start,end):
-    with open("yeast_genes/" + chrom + ".fa", "r") as f:
+#by default, sacCer3 (incl) is used as reference.
+#otherwise, create a dictionary of the sequences of chromosomes, use that as reference
+#use set_index_file to provide a path to a pre-constructed bowtie index
+
+reference_sacCer3 = True #global
+
+def set_chrom_dict(new_chrom_dict):
+    '''Set new_chrom_dict, a dictionary of chromosome names to sequences as the reference genome'''
+    global chrom_dict
+    chrom_dict = new_chrom_dict
+    global reference_sacCer3
+    reference_sacCer3 = False
+
+def obtain_chrom_dict():
+    '''Returns the chromosome dictionary being used as the reference, or returns None if sacCer3 (default) is being used'''
+    print('reference is sacCer3', reference_sacCer3)
+    if not reference_sacCer3:
+        return chrom_dict
+    else:
+        return None
+    
+def set_index_file(fname):
+    '''set a global variable for the path to the bowtie index'''
+    global index_file
+    index_file = fname
+    print(f'Set index as {fname}')
+
+def set_db_genes(db):
+    '''Set a pandas dataframe as the global variable db_genes
+    contains information about genes and their coordinates'''
+    global db_genes 
+    db_genes = db
+    print(f'Set db_genes of {len(db_genes)} genes, first gene is {db_genes.index[0]}')
+
+def get_db_genes():
+    '''return db_genes'''
+    return db_genes
+    
+
+def get_chrom_dict(fname='brar_data/sk1_original.fasta'):
+    '''Read fasta file of genome, return dictionary where keys are chromosome names and values are sequences of the chromosomes'''
+    chrom_dict  = {}
+    with open(fname, 'r') as f:
         lines = f.readlines()
-        seq = "".join(lines[1:])
-        seq = "".join(seq.split("\n"))
-    return seq[start:end]
-'''
+        chrom = "no_chrom"
+        for i, line in enumerate(lines):
+            line =line.strip()
+            #if i <= 10:
+                #print(line)
+            if line[0] == '>':
+                chrom = line[1:]
+                assert(not chrom in chrom_dict)
+                chrom_dict[chrom] = ""
+            else:
+                chrom_dict[chrom] += line
+        print(f'Using {fname} as genome. Chromosome lengths:')
+        print([(k, len(chrom_dict[k])) for k in chrom_dict])
+    return chrom_dict           
 
 '''
-Helper functions below
+Helper functions below - not inded for use by user.
 '''
+
 def rev_complement(seq):
+    '''return the reverse compement of the sequence'''
     nt_pairs = {"A":"T","G":"C","C":"G","T":"A","N":"N","-":"-"} #do i want "-" to be here???
     rev_seq = seq[::-1]
     rev_seq = [nt_pairs[nt] for nt in rev_seq]
     return "".join(rev_seq)
 
 def get_guide(chrom, cut_pos, strand):
-    #TODO --> assert NGG??
+    '''Return the guide sequence that cuts at the given position on the given chromosome strand'''
+    #does not assert NGG --> just returns guide around cut pos
     if strand=="-":
         return rev_complement(get_seq(chrom,cut_pos-3,cut_pos+17))
     else:
         return get_seq(chrom, cut_pos-17, cut_pos+3)
     
 def guide_list_to_dict(gl):
+    """make a dictionary out of a list of guides"""
     return {str(x[1])+"_"+str(x[2])+x[3]:x[0] for x in gl}
 
-#guides_dict is guide_name : guide_seq
+
 def make_fastq_file(fname, guides_dict, add_pam=False, ignore_bases = 0):
+    '''Make a fastq file from a dictionary of guide sequences'''
+    #guides_dict is guide_name : guide_seq
     #if add_pam, we want to add "NGG" for the guide
     #print(guides_dict)
     pam = ""
     if add_pam:
         pam ="NGG" #question --> note that this 'N' counts as an extra mismatch
+        #don't add it by default
     with open(fname, 'w') as f:
         for key in guides_dict:
             try:
@@ -472,10 +414,8 @@ def make_fastq_file(fname, guides_dict, add_pam=False, ignore_bases = 0):
                 raise ValueError()
     return
 
-#position in gene to position in chromosome
-## NOGAP pos in gene
-#TODO - test
 def gene_pos_to_chrom_pos(gene, pos, w=10, throw_error=True, w_in_bp=False):
+    '''Convert the 0-index base position in a gene to the 0-index position on the chromosome by referencing db_genes'''
     #remember, pos is start of window relative to gene
     #but chrom_pos needs to be _start_ of window on + strand
     #(so if gene is on - starnd its actually the end of the window)
@@ -489,8 +429,8 @@ def gene_pos_to_chrom_pos(gene, pos, w=10, throw_error=True, w_in_bp=False):
     elif strand == -1:
         strand = "-"
     num_exons = db_genes.exonCount[gene]
-    #TODO: pretty sure start/end in db_genes refers to
-    #loc on chrom (not strand) but check
+    #pretty sure start/end in db_genes refers to
+    #loc on chrom (not strand) 
     exon_starts = db_genes.exonStarts[gene]
     exon_ends = db_genes.exonEnds[gene]
     if strand=="+":
@@ -543,11 +483,13 @@ def gene_pos_to_chrom_pos(gene, pos, w=10, throw_error=True, w_in_bp=False):
     #start should be start of 10 bp window on + strand 
 
 def num_mismatch(s1,s2):
+    '''Number of mismatches between two equal length strings'''
     assert(len(s1)==len(s2))
     return sum([1 for i in range(len(s1)) if s1[i] != s2[i]])
 
-#TODO: which one?
-def get_chrom_pos(gene, gene_pos, w): #another version exists, but I wanted this for test. w is in bp
+def get_chrom_pos(gene, gene_pos, w): #w is in bp
+    '''Convert the 0-index base position in a gene to the 0-index position on the chromosome by referencing db_genes.
+    A different version of gene_pos_to_chrom_pos, written for sanity checks.'''
     exon_starts = db_genes.exonStarts[gene]
     exon_ends = db_genes.exonEnds[gene]
     exon_lengths = list(np.array(exon_ends) - np.array(exon_starts))
@@ -573,10 +515,13 @@ def get_chrom_pos(gene, gene_pos, w): #another version exists, but I wanted this
         return exon_starts[j]+pos_after_exon_start[-1]
     
 def amino_acid_seq(seq):
+    """turn DNA seq to AA seq"""
     assert(len(seq)%3 == 0)
     return [codon_info.AA[seq[i*3:i*3+3]] for i in range(len(seq)//3)]
         
 def get_seq_in_gene(gene, start_bp, end_bp):
+    """get the sequence of a gene between start_bp and end_bp (in the gene)
+    pulls sequence from reference instead of db_genes (for sanity checks)"""
     assert(start_bp >= 0)
     assert(start_bp < end_bp)
     exon_starts = db_genes.exonStarts[gene]
@@ -588,15 +533,10 @@ def get_seq_in_gene(gene, start_bp, end_bp):
         seq = rev_complement(seq)
     assert(end_bp <= len(seq))
     return seq[start_bp:end_bp]
-        
-        
-def round_abs(x):
-    if x >= 0:
-        return np.ceil(x)
-    return np.floor(x)
 
 def intersecting_intron(gene, start, end, verbose=False):
-    #TODO - also make sure it's not interesecting start/stop of gene!!!
+    '''check if there is an intron between start and end of the coding sequence of a gene'''
+    #also make sure it's not interesecting start/stop of gene!!!
     #start and end refer to chrom pos on + strand
     assert(start < end)
     exon_starts = np.array(db_genes.exonStarts[gene])
@@ -616,21 +556,18 @@ def intersecting_intron(gene, start, end, verbose=False):
         return True
 
 def filter_for_change(inserts_db):
+    """check that the guide_seq + NGG has no match in the donor"""
+    #otherwise, guide would cause Cas9 to cut the donor
     #this HAS to be used if mutations are just deletions without accounting for context
-    #checks that the guide_seq + NGG has NO match in the donor
     changed = np.array([not bool(re.search(inserts_db.guide_seq[i] + '.GG', inserts_db.donor[i])) for i in inserts_db.index]).astype(bool)
     return inserts_db[changed]
 
-#lenient allows for any mismatch in seed
 def filter_guides(inserts_db, guide_col="guide_seq", lenient=False, random_guides=False):
-    #filter guides for those that have no off-targets (<= 3 mismatches) 
+    """Filter guides for those that have no off targets (<=3 mismatches to target).
+    lenient=True also allows any guides with off targets that have at least one mismatch in the seed region"""
     #add 'n_off_targets' to 'filter_guides'
     save_f = "tmp/inserts.fa"
-    #TODO
-    #seed here will be considered the 10 nt upstream of the guide
     make_fastq_file(save_f, {str(i):inserts_db[guide_col][i] for i in inserts_db.index}, add_pam=False, ignore_bases=0)
-    #%cd /mnt/lareaulab/shelen/slow_codons_2021/data/
-    #os.system(f"bowtie -f -v 3 -a {index_file} tmp/inserts.fa > tmp/bowtie_out.csv")
     os.system(f"bowtie -f -v 3 -a {index_file} tmp/inserts.fa > tmp/bowtie_out.csv") 
     #wanted to change to -v 4 because 'N' in PAM is always a mismatch
     #unfortunate. Turns out you can't have mismatch-4, only up to 3
@@ -650,18 +587,13 @@ def filter_guides(inserts_db, guide_col="guide_seq", lenient=False, random_guide
     #... or do 
     load_f = "tmp/bowtie_out.csv"
     bowtie_info = pd.read_csv(load_f, sep="\t", header=None, names=["guide_id","strand","chr","chr_pos","seq","aln","?","mismatch"])
-    #TODO - allow mismatches if the mismatch is in the PAM region? [21,22]
-    #bowtie_info = bowtie_info[~(bowtie_info.mismatch.str.contains('21') | bowtie_info.mismatch.str.contains('22'))]
     bowtie_info = bowtie_info.fillna("") #some mismatch entries are empty
     if lenient:
         #if lenient, treat any with a mismatch in the seed as a mismatch [seed region = 7 bp]
         searchfor =  '|'.join([str(x) for x in range(13,20)])
         print(f"Removing {np.sum(bowtie_info.mismatch.str.contains(searchfor))} off-targets with mismatch in seed")
-        #print(bowtie_info.mismatch.str.contains(searchfor)[0:10])
-        #print(bowtie_info.mismatch.str.contains(searchfor).dtype)
         bowtie_info = bowtie_info[~(bowtie_info.mismatch.str.contains(searchfor))]
-    #TODO - allow mismatches if there are off-targets in the seed region?
-    #TODO - check if there is a PAM after the sequence?
+    #check if there is a PAM after the sequence
     print('Checking for PAMs')
     #need to account for strand       
     bowtie_info["PAM"] = [((bowtie_info.strand[i]=='+') and (get_seq(bowtie_info.chr[i], bowtie_info.chr_pos[i]+21, bowtie_info.chr_pos[i]+23) == 'GG')) or
@@ -671,21 +603,18 @@ def filter_guides(inserts_db, guide_col="guide_seq", lenient=False, random_guide
         bowtie_info = bowtie_info[bowtie_info.PAM] #only those that have a PAM are valid alignments 
         #for random guides, let's get guides that align nowhere at all ... ?
     #maybe there's a lot of guides that only align to one spot, but have multiple targets
-    #TODO: this works now, clean it up
     inserts_db["n_off_targets"] = [sum(bowtie_info.guide_id == i)-1 for i in inserts_db.index]
     if not random_guides:
         print(inserts_db[inserts_db.n_off_targets < 0])
         assert(np.all(inserts_db.n_off_targets >= 0)), "some guides not aligned by bowtie at all??"
     return inserts_db
-    #guides_to_use = [seq for seq in inserts_db[guide_col] if sum(bowtie_info.seq==seq) == 1]
-    #return guides_to_use #sequences of guides
+
 
 def add_edits_info(idb): 
-
+    '''Add information about the edits created by the guide-donor oligos
+    Including if the edit is in the PAM, how many bases are changed between the guide and donor sequence,
+    the position of the edited bases in the guide sequence, and the length of any repeats'''
     #assumes 50 bp arms
-    #TODO -- this is hacky in how it handles deletion, fix.
-    #how was this handled before?
-    
     #add info about edits to db
     #how many edits away from wt
     #how many edits in guide
@@ -693,9 +622,6 @@ def add_edits_info(idb):
     # -17 .... -1 |cut| 0 1 2   (indexing scheme)
     #change indexing scheme to:  -4 |cut| -3 -2 -1 0 1 2 (where 1 and 2 are PAM GG)
     #longest homopolymer in [mutated] donor 
-    #TODO - so -- how does this work with direction of guide and donor?
-    #TODO - does this work for deletions....?? or do you need to shift...?
-    n_edits = []
     n_edits_guide = []
     edits_in_pam = []
     edit_pos = []
@@ -722,14 +648,14 @@ def add_edits_info(idb):
         #used to not include edits in PAM, now it does 
         edit_pos.append(closest_edit_to_cut(wt[33+shift:56+shift], donor[33:56]))
         homopolymer.append(longest_run(donor))
-    #idb["edits"] = n_edits #no longer using this
     idb["edit_in_pam"] = edits_in_pam
     idb["edits_in_guide"] = n_edits_guide 
-    idb["edit_position"] = edit_pos  #TODO I'd prefer to just get 1 2 for an edit in pam - this is the case now I think
+    idb["edit_position"] = edit_pos  #gets 1 2 for an edit in pam 
     idb["repeat_length"] = homopolymer
 
         
 def closest_edit_to_cut(guide, edited):
+    '''find the position of the mutated base that is closest to the PAM of the guide'''
     #include PAM
     assert(len(guide) == 23)
     assert(len(edited) == 23)
@@ -742,6 +668,7 @@ def closest_edit_to_cut(guide, edited):
         return int(max(edits))
     
 def longest_run(seq):
+    '''longest run of a single character in the sequence'''
     max_c = 1
     c = 1
     for i in range(1,len(seq)):
@@ -752,8 +679,8 @@ def longest_run(seq):
             c = 1
     return max_c
 
-#CHANGE definition of 'target' to include new window.
 def count_replicates(inserts_db, modify=True):
+    '''count how many different guides create the same mutation'''
     #how many guides each target has
     replicates = []
     for i in inserts_db.index:
@@ -771,6 +698,7 @@ def count_replicates(inserts_db, modify=True):
         return inserts_db
     
 def within_guide_pos(insert_row, min_pos=-15, max_pos=2, ha_bp=50):
+    '''check if edits fall between some positions in the guide sequence'''
     #generally between -15 and 2 for w3
     wt_seq = np.array([ch for ch in insert_row.wt_seq])
     mod_seq = np.array([ch for ch in insert_row.donor])
@@ -783,9 +711,11 @@ def within_guide_pos(insert_row, min_pos=-15, max_pos=2, ha_bp=50):
     #making sure edits fall between some pos in guide
 
 def select_guides(inserts_db, seed_size=7):
-    #select guides that have < 10 bp homopolymer
-    #and an edit within the seed region (-7) in the guide
-    #or an edit in the PAM
+    '''
+    select guides that have < 10 bp homopolymer
+    and an edit within the seed region (-7) in the guide
+    or an edit in the PAM
+    '''
     repeats = inserts_db.repeat_length < 10
     print(np.sum(~repeats), "guide have a long (10+) repeat")
     guide_edit = inserts_db.edit_position >= -seed_size
@@ -795,9 +725,9 @@ def select_guides(inserts_db, seed_size=7):
     print("Edit positions: ", sorted(collections.Counter(inserts_db.edit_position).items()))
     inserts_db["selected"] = repeats & (guide_edit | PAM_edit)
     
-#what we want is to filter for unique guides
 def unique_guides_filter(idb, maximize_replicates=True):
-    #does this modify in place or return a new one?
+    '''filter inserts db for unique guides'''
+    #modify in place
     #if "target" not in idb.columns:
     #    idb["target"] = [idb.gene[i]+"_"+str(idb.w_codon_num[i]) for i in idb.index]
     #for guides that are not unique...
@@ -824,6 +754,7 @@ def unique_guides_filter(idb, maximize_replicates=True):
     return idb 
 
 def num_targets(inserts_db):
+    '''number of unique targets in inserts_db'''
     #assumes all windows are unique [wrong]
     if "target" in inserts_db.columns:
         return len(set(inserts_db.target))
@@ -831,6 +762,7 @@ def num_targets(inserts_db):
 
 
 def slow_to_fast(seq):
+    '''change all codons in sequence to fastest possible codon according to codon_info'''
     if len(seq)%3 != 0:
         raise ValueError("len seq not mod 3")
     codon_seq = [seq[i*3:i*3+3] for i in range(len(seq)//3)]   
@@ -843,14 +775,17 @@ def slow_to_fast(seq):
 
 
 def get_start_positions(seq):
+    '''find locations of all in-frame start codons in sequence'''
     codon_seq = np.array([seq[i*3:i*3+3] for i in range(len(seq)//3)])
     start_positions = list(np.where(codon_seq == "ATG")[0])
     return start_positions #in codons
 
 def downstream_starts(gene, codon): 
+    """number of start codons in gene downstream of given codon position"""
     seq = db_genes.seq[gene][codon*3+3:]
     return len(get_start_positions(seq))
 
 def percent_loc(gene, codon):
+    """convert location in gene to percentage"""
     gene_length = (db_genes.cdsEnd[gene] - db_genes.cdsStart[gene])//3
     return codon/gene_length
